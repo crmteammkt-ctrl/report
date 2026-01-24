@@ -40,23 +40,35 @@ def _format_numeric_for_display(
 
 def _safe_category_columns(df: pd.DataFrame) -> list[str]:
     numeric_cols = [c for c in df.columns if _is_numeric(df[c])]
-    datetime_cols = [c for c in df.columns if _is_datetime(df[c])]
 
-    # dimension columns = not numeric, not datetime
-    dims = [c for c in df.columns if c not in numeric_cols and c not in datetime_cols]
+    dims = []
 
-    # keep common derived fields even if numeric
-    for c in ["Year", "Month", "YearMonth"]:
+    # 🔹 Cho phép dùng cột Ngày (datetime) làm dimension
+    if "Ngày" in df.columns and _is_datetime(df["Ngày"]):
+        dims.append("Ngày")
+
+    # 🔹 Các cột text/category khác
+    for c in df.columns:
+        if c in numeric_cols:
+            continue
+        if c == "Ngày":
+            continue
+        dims.append(c)
+
+    # 🔹 Ưu tiên các cột thời gian dẫn xuất
+    for c in ["YearMonth", "Year", "Month"]:
         if c in df.columns and c not in dims:
             dims.insert(0, c)
 
-    # remove duplicates while keeping order
+    # remove duplicates, giữ thứ tự
     seen, out = set(), []
     for c in dims:
         if c not in seen:
             seen.add(c)
             out.append(c)
+
     return out
+
 
 
 def _aggfunc(name: str):
