@@ -3,20 +3,118 @@ import pandas as pd
 import numpy as np
 from utils_excel import to_excel_bytes
 
-AGG_CHOICES = ["Sum", "Mean", "Count", "Nunique", "Min", "Max"]
+# =========================================================
+# MEASURE BUILDER (PowerBI-like)
+# =========================================================
+def measure_builder(df: pd.DataFrame) -> dict:
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
+    with st.sidebar:
+        st.subheader("🧮 Measures (tự tạo)")
+        enable = st.checkbox("Bật tạo measure", value=True, key="me_enable")
+
+    if not enable:
+        # vẫn trả session_state để không mất measure đã tạo trước đó
+        if "user_measures" not in st.session_state:
+            st.session_state["user_measures"] = {}
+        return st.session_state["user_measures"]
+
+    with st.sidebar:
+        name = st.text_input("Tên measure", placeholder="VD: Tỷ lệ CK đúng", key="me_name")
+        mtype = st.selectbox(
+            "Loại measure",
+            ["SUM", "COUNT", "NUNIQUE", "RATIO(SUM/SUM)", "WEIGHTED_AVG"],
+            index=0,
+            key="me_type",
+        )
+
+        spec = None
+        if mtype == "SUM":
+            col = st.selectbox("Cột", numeric_cols, index=0, key="me_sum_col")
+            spec = {"type": "sum", "col": col}
+
+        elif mtype == "COUNT":
+            col = st.selectbox("Cột (count non-null)", df.columns.tolist(), index=0, key="me_cnt_col")
+            spec = {"type": "count", "col": col}
+
+        elif mtype == "NUNIQUE":
+            col = st.selectbox("Cột (unique)", df.columns.tolist(), index=0, key="me_nu_col")
+            spec = {"type": "nunique", "col": col}
+
+        elif mtype == "RATIO(SUM/SUM)":
+            num = st.selectbox("Tử số (SUM)", numeric_cols, index=0, key="me_ratio_num")
+            den = st.selectbox("Mẫu số (SUM)", numeric_cols, index=0, key="me_ratio_den")
+            spec = {"type": "ratio", "num": num, "den": den}
+
+        elif mtype == "WEIGHTED_AVG":
+            x = st.selectbox("Giá trị X", numeric_cols, index=0, key="me_wavg_x")
+            w = st.selectbox("Trọng số W", numeric_cols, index=0, key="me_wavg_w")
+            spec = {"type": "wavg", "val": x, "w": w}
+
+        add = st.button("➕ Add measure", use_container_width=True, disabled=(not name or spec is None), key="me_add")
+
+    if "user_measures" not in st.session_state:
+        st.session_state["user_measures"] = {}
+
+    if add and name and spec:
+        st.session_state["user_measures"][name] = spec
+
+    with st.sidebar:
+        if st.session_state["user_measures"]:
+            st.caption("Measures đã tạo:")
+            for k, v in st.session_state["user_measures"].items():
+                st.write(f"- **{k}**: `{v}`")
+
+            if st.button("🗑️ Xoá tất cả measures", use_container_width=True, key="me_clear"):
+                st.session_state["user_measures"] = {}
+                st.rerun()
+
+    return st.session_state.get("user_measures", {})
+
+
+def compute_measures(dff: pd.DataFrame, group_keys: list[str], measures: dict) -> pd.DataFrame:
+    g = dff.groupby(group_keys, dropna=False)
+    out = pd.DataFrame(index=g.size().index)
+
+    for name, spec in measures.items():
+        t = spec["type"]
+
+        if t == "sum":
+            out[name] = g[spec["col"]].sum(min_count=1)
+
+        elif t == "count":
+            out[name] = g[spec["col"]].count()
+
+        elif t == "nunique":
+            out[name] = g[spec["col"]].nunique(dropna=True)
+
+        elif t == "ratio":
+            num = g[spec["num"]].sum(min_count=1)
+            den = g[spec["den"]].sum(min_count=1)
+            out[name] = (num / den).replace([np.inf, -np.inf], np.nan)
+
+        elif t == "wavg":
+            x = spec["val"]
+            w = spec["w"]
+            num = (dff[x] * dff[w]).groupby(group_keys).sum(min_count=1)
+            den = dff[w].groupby(group_keys).sum(min_count=1)
+            out[name] = (num / den).replace([np.inf, -np.inf], np.nan)
+
+    return out.reset_index()
+
+
+# =========================================================
+# PIVOT UTILS
+# =========================================================
+AGG_CHOICES = ["Sum", "Mean", "Count", "Nunique", "Min", "Max"]
 
 def _is_datetime(s: pd.Series) -> bool:
     return pd.api.types.is_datetime64_any_dtype(s)
 
-
 def _is_numeric(s: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(s)
 
-
-def _format_numeric_for_display(
-    df: pd.DataFrame, thousand_sep: bool = True, decimals: int = 0
-) -> pd.DataFrame:
+def _format_numeric_for_display(df: pd.DataFrame, thousand_sep: bool = True, decimals: int = 0) -> pd.DataFrame:
     out = df.copy()
 
     def fmt(x):
@@ -33,21 +131,19 @@ def _format_numeric_for_display(
         return str(x)
 
     for c in out.columns:
-        if _is_numeric(out[c]):
+        if c in out.columns and _is_numeric(out[c]):
             out[c] = out[c].map(fmt)
     return out
 
-
 def _safe_category_columns(df: pd.DataFrame) -> list[str]:
     numeric_cols = [c for c in df.columns if _is_numeric(df[c])]
-
     dims = []
 
-    # 🔹 Cho phép dùng cột Ngày (datetime) làm dimension
+    # cho phép dùng "Ngày" làm dimension
     if "Ngày" in df.columns and _is_datetime(df["Ngày"]):
         dims.append("Ngày")
 
-    # 🔹 Các cột text/category khác
+    # các cột không phải numeric
     for c in df.columns:
         if c in numeric_cols:
             continue
@@ -55,21 +151,18 @@ def _safe_category_columns(df: pd.DataFrame) -> list[str]:
             continue
         dims.append(c)
 
-    # 🔹 Ưu tiên các cột thời gian dẫn xuất
+    # ưu tiên các cột thời gian dẫn xuất nếu có
     for c in ["YearMonth", "Year", "Month"]:
         if c in df.columns and c not in dims:
             dims.insert(0, c)
 
-    # remove duplicates, giữ thứ tự
+    # unique giữ thứ tự
     seen, out = set(), []
     for c in dims:
         if c not in seen:
             seen.add(c)
             out.append(c)
-
     return out
-
-
 
 def _aggfunc(name: str):
     if name == "Sum":
@@ -87,34 +180,32 @@ def _aggfunc(name: str):
     return np.sum
 
 
+# =========================================================
+# FILTERS
+# =========================================================
 def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     dff = df.copy()
 
-    # -----------------------
     # Date filter
-    # -----------------------
     if "Ngày" in dff.columns and _is_datetime(dff["Ngày"]):
         with st.sidebar:
             st.subheader("📅 Date filter")
             min_d = dff["Ngày"].min().date()
             max_d = dff["Ngày"].max().date()
-
-            # mặc định 30 ngày gần nhất
             default_start = max(min_d, (max_d - pd.Timedelta(days=30)))
+
             start, end = st.date_input(
                 "Range",
                 value=(default_start, max_d),
                 min_value=min_d,
                 max_value=max_d,
+                key="date_range",
             )
 
         dff = dff[(dff["Ngày"].dt.date >= start) & (dff["Ngày"].dt.date <= end)]
 
     dims = _safe_category_columns(dff)
 
-    # -----------------------
-    # Choose which columns to filter
-    # -----------------------
     with st.sidebar:
         st.subheader("🧰 Filters")
         st.caption("Chọn cột cần filter (tránh lag).")
@@ -122,17 +213,15 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
             "Filter columns",
             options=dims,
             default=[c for c in ["Brand", "Region", "LoaiCT"] if c in dims],
+            key="filter_cols",
         )
 
-    # -----------------------
-    # Apply filters
-    # -----------------------
     for c in filter_cols:
         nunq = dff[c].nunique(dropna=True)
         if nunq <= 0:
             continue
 
-        # === NHIỀU GIÁ TRỊ: search rồi chọn nhiều ===
+        # nhiều giá trị -> search rồi chọn nhiều
         if nunq > 200:
             with st.sidebar:
                 st.write(f"🔎 Search & select: **{c}** (unique: {nunq:,})")
@@ -140,7 +229,7 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
                 keyword = st.text_input(
                     f"Tìm {c}",
                     value="",
-                    placeholder="VD: NB12 (sẽ hiện danh sách khớp để chọn nhiều)",
+                    placeholder="VD: NB12",
                     key=f"kw_{c}",
                 )
 
@@ -169,10 +258,9 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
                     s2 = s[s.str.contains(kw, case=False, na=False)]
                 elif match_mode == "starts_with":
                     s2 = s[s.str.startswith(kw, na=False)]
-                else:  # equals
+                else:
                     s2 = s[s.str.lower() == kw.lower()]
             else:
-                # chưa gõ thì không show hàng nghìn options
                 s2 = pd.Series([], dtype="string")
 
             options = s2.sort_values().head(int(limit)).tolist()
@@ -187,102 +275,134 @@ def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
                 st.caption(f"Kết quả khớp: {len(s2):,} | đang hiển thị: {len(options):,}")
 
             if picked:
-                picked_set = set(str(x) for x in picked)
-                dff = dff[dff[c].astype(str).isin(picked_set)]
+                dff = dff[dff[c].astype(str).isin(set(map(str, picked)))]
 
             continue
 
-        # === ÍT GIÁ TRỊ: dropdown bình thường ===
-        options = dff[c].dropna().unique().tolist()
-        options = sorted(options, key=lambda x: str(x))
-
+        # ít giá trị -> dropdown thường
+        options = sorted(dff[c].dropna().unique().tolist(), key=lambda x: str(x))
         with st.sidebar:
-            picked = st.multiselect(c, options=options, default=[])
-
+            picked = st.multiselect(c, options=options, default=[], key=f"pick_small_{c}")
         if picked:
             dff = dff[dff[c].isin(picked)]
 
     return dff
 
 
+# =========================================================
+# MAIN RENDER
+# =========================================================
 def render_pivot_builder(df: pd.DataFrame):
     st.header("🧩 Pivot Builder")
 
-    # Apply filters first
+    # 1) filter
     dff = _apply_filters(df)
     if dff.empty:
         st.warning("Sau filter không còn dữ liệu.")
         return
 
+    # 2) measures UI (sidebar)
+    user_measures = measure_builder(dff)
+
+    # dims & numeric
     dims = _safe_category_columns(dff)
     numeric_cols = [c for c in dff.columns if _is_numeric(dff[c])]
 
-    if not numeric_cols:
-        st.error("Không có cột numeric để làm Values. Kiểm tra cột Tổng_Gross/Tổng_Net hoặc convert số.")
-        return
-
     col1, col2 = st.columns([1, 1], gap="large")
     with col1:
-        rows = st.multiselect("Rows (Group by)", options=dims, default=dims[:1] if dims else [])
-        cols = st.multiselect("Columns (Pivot)", options=["(None)"] + dims, default=["(None)"])
+        rows = st.multiselect("Rows (Group by)", options=dims, default=dims[:1] if dims else [], key="rows")
+        cols = st.multiselect("Columns (Pivot)", options=["(None)"] + dims, default=["(None)"], key="cols")
         cols = [c for c in cols if c != "(None)"]
 
     with col2:
-        values = st.multiselect(
-            "Values",
-            options=numeric_cols,
-            default=[c for c in ["Tổng_Net"] if c in numeric_cols] or numeric_cols[:1],
-        )
-        agg_name = st.selectbox("Aggregation", options=AGG_CHOICES, index=0)
-        fillna0 = st.checkbox("Fill NaN = 0", value=True)
+        use_measures = st.checkbox("✅ Dùng Measures (khuyên dùng cho tỷ lệ)", value=True, key="use_measures")
+
+        if use_measures:
+            measure_names = list(user_measures.keys())
+            selected_measures = st.multiselect(
+                "Measures",
+                options=measure_names,
+                default=measure_names[:1] if measure_names else [],
+                key="selected_measures",
+            )
+        else:
+            selected_measures = []
+            values = st.multiselect(
+                "Values",
+                options=numeric_cols,
+                default=[c for c in ["Tổng_Net"] if c in numeric_cols] or numeric_cols[:1],
+                key="values",
+            )
+            agg_name = st.selectbox("Aggregation", options=AGG_CHOICES, index=0, key="agg")
+            fillna0 = st.checkbox("Fill NaN = 0", value=True, key="fillna0")
 
     optA, optB, optC, optD = st.columns([1, 1, 1, 1])
     with optA:
-        show_total = st.checkbox("Show totals", value=False)
+        show_total = st.checkbox("Show totals", value=False, key="show_total")
     with optB:
-        pct_mode = st.selectbox("Percent mode", options=["None", "% of row", "% of column"], index=0)
+        pct_mode = st.selectbox("Percent mode", options=["None", "% of row", "% of column"], index=0, key="pct")
     with optC:
-        thousand_sep = st.checkbox("Thousand separator", value=True)
+        thousand_sep = st.checkbox("Thousand separator", value=True, key="thou")
     with optD:
-        decimals = st.number_input("Decimals", min_value=0, max_value=4, value=0, step=1)
+        decimals = st.number_input("Decimals", min_value=0, max_value=4, value=0, step=1, key="decimals")
 
     if not rows:
         st.warning("Chọn ít nhất 1 cột Rows.")
         return
-    if not values:
-        st.warning("Chọn ít nhất 1 cột Values.")
-        return
 
-    try:
-        pv = pd.pivot_table(
+    # 3) compute pivot
+    if use_measures:
+        if not selected_measures:
+            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo measure ở sidebar rồi chọn.")
+            return
+
+        group_keys = rows + (cols if cols else [])
+        out = compute_measures(
             dff,
-            index=rows,
-            columns=cols if cols else None,
-            values=values,
-            aggfunc=_aggfunc(agg_name),
-            fill_value=0 if fillna0 else None,
-            margins=show_total,
-            margins_name="Total",
-            dropna=False,
+            group_keys=group_keys,
+            measures={m: user_measures[m] for m in selected_measures},
         )
-    except Exception as e:
-        st.error(f"Pivot error: {e}")
-        return
 
-    # flatten columns if MultiIndex
-    if isinstance(pv.columns, pd.MultiIndex):
-        pv.columns = [
-            " | ".join([str(x) for x in tup if x is not None and str(x) != ""])
-            for tup in pv.columns
-        ]
+        if cols:
+            pv = out.pivot_table(index=rows, columns=cols, values=selected_measures, aggfunc="first", margins=show_total)
+            if isinstance(pv.columns, pd.MultiIndex):
+                pv.columns = [" | ".join(map(str, t)) for t in pv.columns]
+            pv = pv.reset_index()
+        else:
+            pv = out
+
     else:
-        pv.columns = pv.columns.map(str)
+        if not values:
+            st.warning("Chọn ít nhất 1 cột Values.")
+            return
 
-    pv = pv.reset_index()
+        try:
+            pv = pd.pivot_table(
+                dff,
+                index=rows,
+                columns=cols if cols else None,
+                values=values,
+                aggfunc=_aggfunc(agg_name),
+                fill_value=0 if fillna0 else None,
+                margins=show_total,
+                margins_name="Total",
+                dropna=False,
+            )
+        except Exception as e:
+            st.error(f"Pivot error: {e}")
+            return
 
-    # Percent mode
+        if isinstance(pv.columns, pd.MultiIndex):
+            pv.columns = [" | ".join([str(x) for x in tup if x is not None and str(x) != ""]) for tup in pv.columns]
+        else:
+            pv.columns = pv.columns.map(str)
+
+        pv = pv.reset_index()
+
+    # 4) Percent mode (áp dụng cho cột numeric result)
     if pct_mode != "None":
-        num_cols = [c for c in pv.columns if c not in rows and _is_numeric(pv[c])]
+        id_cols = set(rows)
+        num_cols = [c for c in pv.columns if c not in id_cols and _is_numeric(pv[c])]
         if num_cols:
             arr = pv[num_cols].astype(float)
             if pct_mode == "% of row":
@@ -292,6 +412,7 @@ def render_pivot_builder(df: pd.DataFrame):
                 denom = arr.sum(axis=0).replace(0, np.nan)
                 pv[num_cols] = (arr.div(denom, axis=1) * 100).round(2)
 
+    # 5) display + export
     st.subheader("✅ Kết quả")
     st.caption(f"Filtered rows: {len(dff):,} | Pivot rows: {len(pv):,}")
 
@@ -300,7 +421,6 @@ def render_pivot_builder(df: pd.DataFrame):
         use_container_width=True,
     )
 
-    # Download
     xlsx = to_excel_bytes(pv, sheet_name="Pivot")
     st.download_button(
         "⬇️ Download Pivot Excel",
@@ -311,11 +431,12 @@ def render_pivot_builder(df: pd.DataFrame):
     )
 
     with st.expander("📈 Quick chart", expanded=False):
-        num_cols = [c for c in pv.columns if c not in rows and _is_numeric(pv[c])]
+        id_cols = set(rows)
+        num_cols = [c for c in pv.columns if c not in id_cols and _is_numeric(pv[c])]
         if not num_cols:
             st.info("Không có cột numeric để vẽ chart.")
         else:
-            ycol = st.selectbox("Y column", options=num_cols)
+            ycol = st.selectbox("Y column", options=num_cols, key="chart_y")
             xcol = rows[0]
             chart_df = pv[[xcol, ycol]].dropna().copy()
             chart_df = chart_df.sort_values(by=ycol, ascending=False).head(30)
