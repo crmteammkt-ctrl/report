@@ -4,31 +4,52 @@ import numpy as np
 from utils_excel import to_excel_bytes
 
 # =========================================================
-# MEASURE BUILDER (PowerBI-like)
+# MEASURE BUILDER
 # =========================================================
 def measure_builder(df: pd.DataFrame) -> dict:
     numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+    if "user_measures" not in st.session_state:
+        st.session_state["user_measures"] = {}
 
     with st.sidebar:
         st.subheader("🧮 Measures (tự tạo)")
         enable = st.checkbox("Bật tạo measure", value=True, key="me_enable")
 
+        # ---- Add nhanh measure tỷ lệ CK đúng ----
+        can_add_ck = ("Tổng_Gross" in df.columns) and ("Tổng_Net" in df.columns)
+        if st.button(
+            "➕ Add nhanh: Tỷ lệ CK = (Gross - Net) / Gross",
+            use_container_width=True,
+            disabled=not can_add_ck,
+            key="me_quick_ck",
+        ):
+            st.session_state["user_measures"]["Tỷ lệ CK (Gross-Net)/Gross"] = {
+                "type": "ck_rate",
+                "gross": "Tổng_Gross",
+                "net": "Tổng_Net",
+            }
+            st.success("Đã thêm measure Tỷ lệ CK!")
+
+        if not can_add_ck:
+            st.caption("⚠ Không thấy cột 'Tổng_Gross' hoặc 'Tổng_Net' nên chưa add nhanh được.")
+
     if not enable:
-        # vẫn trả session_state để không mất measure đã tạo trước đó
-        if "user_measures" not in st.session_state:
-            st.session_state["user_measures"] = {}
         return st.session_state["user_measures"]
 
     with st.sidebar:
+        st.markdown("### ➕ Tạo measure mới")
         name = st.text_input("Tên measure", placeholder="VD: Tỷ lệ CK đúng", key="me_name")
+
         mtype = st.selectbox(
             "Loại measure",
-            ["SUM", "COUNT", "NUNIQUE", "RATIO(SUM/SUM)", "WEIGHTED_AVG"],
+            ["SUM", "COUNT", "NUNIQUE", "RATIO(SUM/SUM)", "WEIGHTED_AVG", "CK_RATE (Gross-Net)/Gross"],
             index=0,
             key="me_type",
         )
 
         spec = None
+
         if mtype == "SUM":
             col = st.selectbox("Cột", numeric_cols, index=0, key="me_sum_col")
             spec = {"type": "sum", "col": col}
@@ -51,17 +72,30 @@ def measure_builder(df: pd.DataFrame) -> dict:
             w = st.selectbox("Trọng số W", numeric_cols, index=0, key="me_wavg_w")
             spec = {"type": "wavg", "val": x, "w": w}
 
-        add = st.button("➕ Add measure", use_container_width=True, disabled=(not name or spec is None), key="me_add")
+        elif mtype == "CK_RATE (Gross-Net)/Gross":
+            gross = st.selectbox(
+                "Gross (SUM)",
+                options=numeric_cols,
+                index=numeric_cols.index("Tổng_Gross") if "Tổng_Gross" in numeric_cols else 0,
+                key="me_ck_gross",
+            )
+            net = st.selectbox(
+                "Net (SUM)",
+                options=numeric_cols,
+                index=numeric_cols.index("Tổng_Net") if "Tổng_Net" in numeric_cols else 0,
+                key="me_ck_net",
+            )
+            spec = {"type": "ck_rate", "gross": gross, "net": net}
 
-    if "user_measures" not in st.session_state:
-        st.session_state["user_measures"] = {}
+        add = st.button("➕ Add measure", use_container_width=True, disabled=(not name or spec is None), key="me_add")
 
     if add and name and spec:
         st.session_state["user_measures"][name] = spec
+        st.success(f"Đã thêm measure: {name}")
 
     with st.sidebar:
         if st.session_state["user_measures"]:
-            st.caption("Measures đã tạo:")
+            st.markdown("### 📌 Measures đã tạo")
             for k, v in st.session_state["user_measures"].items():
                 st.write(f"- **{k}**: `{v}`")
 
@@ -69,7 +103,7 @@ def measure_builder(df: pd.DataFrame) -> dict:
                 st.session_state["user_measures"] = {}
                 st.rerun()
 
-    return st.session_state.get("user_measures", {})
+    return st.session_state["user_measures"]
 
 
 def compute_measures(dff: pd.DataFrame, group_keys: list[str], measures: dict) -> pd.DataFrame:
@@ -99,6 +133,13 @@ def compute_measures(dff: pd.DataFrame, group_keys: list[str], measures: dict) -
             num = (dff[x] * dff[w]).groupby(group_keys).sum(min_count=1)
             den = dff[w].groupby(group_keys).sum(min_count=1)
             out[name] = (num / den).replace([np.inf, -np.inf], np.nan)
+
+        elif t == "ck_rate":
+            gross_col = spec["gross"]
+            net_col = spec["net"]
+            gross_sum = g[gross_col].sum(min_count=1)
+            net_sum = g[net_col].sum(min_count=1)
+            out[name] = ((gross_sum - net_sum) / gross_sum).replace([np.inf, -np.inf], np.nan)
 
     return out.reset_index()
 
@@ -139,11 +180,11 @@ def _safe_category_columns(df: pd.DataFrame) -> list[str]:
     numeric_cols = [c for c in df.columns if _is_numeric(df[c])]
     dims = []
 
-    # cho phép dùng "Ngày" làm dimension
+    # Cho phép dùng "Ngày" làm dimension
     if "Ngày" in df.columns and _is_datetime(df["Ngày"]):
         dims.append("Ngày")
 
-    # các cột không phải numeric
+    # Các cột không phải numeric
     for c in df.columns:
         if c in numeric_cols:
             continue
@@ -151,12 +192,12 @@ def _safe_category_columns(df: pd.DataFrame) -> list[str]:
             continue
         dims.append(c)
 
-    # ưu tiên các cột thời gian dẫn xuất nếu có
+    # Ưu tiên các cột thời gian dẫn xuất nếu có
     for c in ["YearMonth", "Year", "Month"]:
         if c in df.columns and c not in dims:
             dims.insert(0, c)
 
-    # unique giữ thứ tự
+    # Unique giữ thứ tự
     seen, out = set(), []
     for c in dims:
         if c not in seen:
@@ -304,7 +345,6 @@ def render_pivot_builder(df: pd.DataFrame):
     # 2) measures UI (sidebar)
     user_measures = measure_builder(dff)
 
-    # dims & numeric
     dims = _safe_category_columns(dff)
     numeric_cols = [c for c in dff.columns if _is_numeric(dff[c])]
 
@@ -353,7 +393,7 @@ def render_pivot_builder(df: pd.DataFrame):
     # 3) compute pivot
     if use_measures:
         if not selected_measures:
-            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo measure ở sidebar rồi chọn.")
+            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
             return
 
         group_keys = rows + (cols if cols else [])
@@ -376,21 +416,17 @@ def render_pivot_builder(df: pd.DataFrame):
             st.warning("Chọn ít nhất 1 cột Values.")
             return
 
-        try:
-            pv = pd.pivot_table(
-                dff,
-                index=rows,
-                columns=cols if cols else None,
-                values=values,
-                aggfunc=_aggfunc(agg_name),
-                fill_value=0 if fillna0 else None,
-                margins=show_total,
-                margins_name="Total",
-                dropna=False,
-            )
-        except Exception as e:
-            st.error(f"Pivot error: {e}")
-            return
+        pv = pd.pivot_table(
+            dff,
+            index=rows,
+            columns=cols if cols else None,
+            values=values,
+            aggfunc=_aggfunc(agg_name),
+            fill_value=0 if fillna0 else None,
+            margins=show_total,
+            margins_name="Total",
+            dropna=False,
+        )
 
         if isinstance(pv.columns, pd.MultiIndex):
             pv.columns = [" | ".join([str(x) for x in tup if x is not None and str(x) != ""]) for tup in pv.columns]
@@ -399,7 +435,7 @@ def render_pivot_builder(df: pd.DataFrame):
 
         pv = pv.reset_index()
 
-    # 4) Percent mode (áp dụng cho cột numeric result)
+    # 4) Percent mode (áp dụng cho numeric result)
     if pct_mode != "None":
         id_cols = set(rows)
         num_cols = [c for c in pv.columns if c not in id_cols and _is_numeric(pv[c])]
