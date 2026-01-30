@@ -405,9 +405,9 @@ def render_pivot_builder(df: pd.DataFrame):
 
         group_keys = rows + (cols if cols else [])
         if use_measures:
-    if not selected_measures:
-        st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
-        return
+            if not selected_measures:
+            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
+            return
 
     # UI: cho phép thêm cột SUM song song với measure
     add_sum_cols = st.multiselect(
