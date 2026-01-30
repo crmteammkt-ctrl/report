@@ -167,25 +167,64 @@ def _is_datetime(s: pd.Series) -> bool:
 def _is_numeric(s: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(s)
 
-def _format_numeric_for_display(df: pd.DataFrame, thousand_sep: bool = True, decimals: int = 0) -> pd.DataFrame:
-    out = df.copy()
-
-    def fmt(x):
-        if pd.isna(x):
-            return ""
-        if isinstance(x, (int, np.integer)):
-            return f"{x:,}" if thousand_sep else str(x)
-        if isinstance(x, (float, np.floating)):
-            if not np.isfinite(x):
-                return ""
-            if decimals <= 0:
-                return f"{x:,.0f}" if thousand_sep else f"{x:.0f}"
-            return f"{x:,.{decimals}f}" if thousand_sep else f"{x:.{decimals}f}"
+def _fmt_number(x, decimals=0, thousand_sep=True):
+    if pd.isna(x):
+        return ""
+    try:
+        v = float(x)
+    except Exception:
         return str(x)
+    if not np.isfinite(v):
+        return ""
+    if decimals <= 0:
+        return f"{v:,.0f}" if thousand_sep else f"{v:.0f}"
+    return f"{v:,.{decimals}f}" if thousand_sep else f"{v:.{decimals}f}"
+
+def apply_format_rules(
+    pv: pd.DataFrame,
+    rules: dict,
+    thousand_sep_default=True,
+    decimals_default=0
+) -> pd.DataFrame:
+    """
+    rules = {
+      "colname": {"type":"number|percent|currency|raw", "decimals":2, "thousand":True, "prefix":"₫ ", "suffix":""}
+    }
+    """
+    out = pv.copy()
 
     for c in out.columns:
-        if c in out.columns and _is_numeric(out[c]):
-            out[c] = out[c].map(fmt)
+        r = rules.get(c)
+
+        # default: format numeric as number
+        if not r:
+            if pd.api.types.is_numeric_dtype(out[c]):
+                out[c] = out[c].map(lambda x: _fmt_number(x, decimals_default, thousand_sep_default))
+            continue
+
+        ftype = r.get("type", "number")
+        dec = int(r.get("decimals", decimals_default))
+        thou = bool(r.get("thousand", thousand_sep_default))
+        prefix = r.get("prefix", "")
+        suffix = r.get("suffix", "")
+
+        if ftype == "raw":
+            out[c] = out[c].astype(str)
+            continue
+
+        if not pd.api.types.is_numeric_dtype(out[c]):
+            out[c] = out[c].astype(str)
+            continue
+
+        if ftype == "percent":
+            out[c] = out[c].map(
+                lambda x: "" if pd.isna(x) else (f"{float(x)*100:,.{dec}f}%" if thou else f"{float(x)*100:.{dec}f}%")
+            )
+        elif ftype == "currency":
+            out[c] = out[c].map(lambda x: "" if pd.isna(x) else f"{prefix}{_fmt_number(x, dec, thou)}{suffix}")
+        else:  # number
+            out[c] = out[c].map(lambda x: _fmt_number(x, dec, thou))
+
     return out
 
 def _safe_category_columns(df: pd.DataFrame) -> list[str]:
@@ -384,7 +423,7 @@ def render_pivot_builder(df: pd.DataFrame):
                 key="add_sum_cols",
             )
 
-            # để tránh lỗi biến khi xuống dưới
+            # placeholders to avoid UnboundLocalError
             values, agg_name, fillna0 = [], "Sum", True
         else:
             selected_measures = []
@@ -407,7 +446,7 @@ def render_pivot_builder(df: pd.DataFrame):
     with optC:
         thousand_sep = st.checkbox("Thousand separator", value=True, key="thou")
     with optD:
-        decimals = st.number_input("Decimals", min_value=0, max_value=4, value=0, step=1, key="decimals")
+        decimals = st.number_input("Decimals", min_value=0, max_value=6, value=0, step=1, key="decimals")
 
     if not rows:
         st.warning("Chọn ít nhất 1 cột Rows.")
@@ -481,20 +520,85 @@ def render_pivot_builder(df: pd.DataFrame):
             arr = pv[num_cols].astype(float)
             if pct_mode == "% of row":
                 denom = arr.sum(axis=1).replace(0, np.nan)
-                pv[num_cols] = (arr.div(denom, axis=0) * 100).round(2)
+                pv[num_cols] = (arr.div(denom, axis=0) * 100).round(6)
             elif pct_mode == "% of column":
                 denom = arr.sum(axis=0).replace(0, np.nan)
-                pv[num_cols] = (arr.div(denom, axis=1) * 100).round(2)
+                pv[num_cols] = (arr.div(denom, axis=1) * 100).round(6)
+
+    # =========================
+    # FORMAT UI (per-column)
+    # =========================
+    with st.expander("🎨 Format cột (tuỳ chọn)", expanded=False):
+        st.caption("Chọn format cho từng cột output. File Excel download vẫn giữ số thật (raw).")
+
+        id_cols = set(rows)
+        value_like_cols = [c for c in pv.columns if c not in id_cols]
+
+        if "pivot_format_rules" not in st.session_state:
+            st.session_state["pivot_format_rules"] = {}
+
+        # default chung
+        thou_default = st.checkbox("Default: Thousand separator", value=thousand_sep, key="fmt_default_thou")
+        dec_default = st.number_input("Default: Decimals", 0, 6, int(decimals), 1, key="fmt_default_dec")
+
+        # gợi ý chọn sẵn cột có chữ CK/Tỷ lệ
+        suggest_default = [c for c in value_like_cols if ("ck" in str(c).lower() or "tỷ" in str(c).lower() or "ty" in str(c).lower())]
+        target_cols = st.multiselect(
+            "Chọn cột cần format riêng",
+            options=value_like_cols,
+            default=suggest_default,
+            key="fmt_target_cols",
+        )
+
+        for col in target_cols:
+            st.markdown(f"**{col}**")
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
+
+            # default type heuristic
+            default_type = "percent" if ("ck" in str(col).lower() or "tỷ" in str(col).lower() or "ty" in str(col).lower()) else "number"
+
+            with c1:
+                ftype = st.selectbox(
+                    f"Type - {col}",
+                    options=["number", "percent", "currency", "raw"],
+                    index=["number", "percent", "currency", "raw"].index(default_type),
+                    key=f"fmt_type_{col}",
+                )
+            with c2:
+                dec = st.number_input(f"Dec - {col}", 0, 6, dec_default, 1, key=f"fmt_dec_{col}")
+            with c3:
+                thou = st.checkbox(f"Thou - {col}", value=thou_default, key=f"fmt_thou_{col}")
+            with c4:
+                prefix_default = "₫ " if ftype == "currency" else ""
+                prefix = st.text_input(f"Prefix - {col}", value=prefix_default, key=f"fmt_pre_{col}")
+                suffix = st.text_input(f"Suffix - {col}", value="", key=f"fmt_suf_{col}")
+
+            st.session_state["pivot_format_rules"][col] = {
+                "type": ftype,
+                "decimals": int(dec),
+                "thousand": bool(thou),
+                "prefix": prefix,
+                "suffix": suffix,
+            }
+
+        if st.button("Reset format rules", use_container_width=True, key="fmt_reset"):
+            st.session_state["pivot_format_rules"] = {}
+            st.rerun()
+
+    pv_display = apply_format_rules(
+        pv,
+        rules=st.session_state.get("pivot_format_rules", {}),
+        thousand_sep_default=thousand_sep,
+        decimals_default=int(decimals),
+    )
 
     # 5) display + export
     st.subheader("✅ Kết quả")
     st.caption(f"Filtered rows: {len(dff):,} | Pivot rows: {len(pv):,}")
 
-    st.dataframe(
-        _format_numeric_for_display(pv, thousand_sep=thousand_sep, decimals=int(decimals)),
-        use_container_width=True,
-    )
+    st.dataframe(pv_display, use_container_width=True)
 
+    # Download (raw pv, không format thành text)
     xlsx = to_excel_bytes(pv, sheet_name="Pivot")
     st.download_button(
         "⬇️ Download Pivot Excel",
@@ -506,6 +610,7 @@ def render_pivot_builder(df: pd.DataFrame):
 
     with st.expander("📈 Quick chart", expanded=False):
         id_cols = set(rows)
+        # chart dùng số raw (pv) để đúng
         num_cols = [c for c in pv.columns if c not in id_cols and _is_numeric(pv[c])]
         if not num_cols:
             st.info("Không có cột numeric để vẽ chart.")
