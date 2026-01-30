@@ -32,7 +32,7 @@ def measure_builder(df: pd.DataFrame) -> dict:
             st.success("Đã thêm measure Tỷ lệ CK!")
 
         if not can_add_ck:
-            st.caption("⚠ Không thấy cột 'Tổng_Gross' hoặc 'Tổng_Net' nên chưa add nhanh được.")
+            st.caption("⚠ Không thấy 'Tổng_Gross' hoặc 'Tổng_Net' nên nút add nhanh bị tắt.")
 
     if not enable:
         return st.session_state["user_measures"]
@@ -51,8 +51,11 @@ def measure_builder(df: pd.DataFrame) -> dict:
         spec = None
 
         if mtype == "SUM":
-            col = st.selectbox("Cột", numeric_cols, index=0, key="me_sum_col")
-            spec = {"type": "sum", "col": col}
+            if numeric_cols:
+                col = st.selectbox("Cột", numeric_cols, index=0, key="me_sum_col")
+                spec = {"type": "sum", "col": col}
+            else:
+                st.warning("Không có cột numeric.")
 
         elif mtype == "COUNT":
             col = st.selectbox("Cột (count non-null)", df.columns.tolist(), index=0, key="me_cnt_col")
@@ -63,29 +66,38 @@ def measure_builder(df: pd.DataFrame) -> dict:
             spec = {"type": "nunique", "col": col}
 
         elif mtype == "RATIO(SUM/SUM)":
-            num = st.selectbox("Tử số (SUM)", numeric_cols, index=0, key="me_ratio_num")
-            den = st.selectbox("Mẫu số (SUM)", numeric_cols, index=0, key="me_ratio_den")
-            spec = {"type": "ratio", "num": num, "den": den}
+            if numeric_cols:
+                num = st.selectbox("Tử số (SUM)", numeric_cols, index=0, key="me_ratio_num")
+                den = st.selectbox("Mẫu số (SUM)", numeric_cols, index=0, key="me_ratio_den")
+                spec = {"type": "ratio", "num": num, "den": den}
+            else:
+                st.warning("Không có cột numeric.")
 
         elif mtype == "WEIGHTED_AVG":
-            x = st.selectbox("Giá trị X", numeric_cols, index=0, key="me_wavg_x")
-            w = st.selectbox("Trọng số W", numeric_cols, index=0, key="me_wavg_w")
-            spec = {"type": "wavg", "val": x, "w": w}
+            if numeric_cols:
+                x = st.selectbox("Giá trị X", numeric_cols, index=0, key="me_wavg_x")
+                w = st.selectbox("Trọng số W", numeric_cols, index=0, key="me_wavg_w")
+                spec = {"type": "wavg", "val": x, "w": w}
+            else:
+                st.warning("Không có cột numeric.")
 
         elif mtype == "CK_RATE (Gross-Net)/Gross":
-            gross = st.selectbox(
-                "Gross (SUM)",
-                options=numeric_cols,
-                index=numeric_cols.index("Tổng_Gross") if "Tổng_Gross" in numeric_cols else 0,
-                key="me_ck_gross",
-            )
-            net = st.selectbox(
-                "Net (SUM)",
-                options=numeric_cols,
-                index=numeric_cols.index("Tổng_Net") if "Tổng_Net" in numeric_cols else 0,
-                key="me_ck_net",
-            )
-            spec = {"type": "ck_rate", "gross": gross, "net": net}
+            if numeric_cols:
+                gross = st.selectbox(
+                    "Gross (SUM)",
+                    options=numeric_cols,
+                    index=numeric_cols.index("Tổng_Gross") if "Tổng_Gross" in numeric_cols else 0,
+                    key="me_ck_gross",
+                )
+                net = st.selectbox(
+                    "Net (SUM)",
+                    options=numeric_cols,
+                    index=numeric_cols.index("Tổng_Net") if "Tổng_Net" in numeric_cols else 0,
+                    key="me_ck_net",
+                )
+                spec = {"type": "ck_rate", "gross": gross, "net": net}
+            else:
+                st.warning("Không có cột numeric.")
 
         add = st.button("➕ Add measure", use_container_width=True, disabled=(not name or spec is None), key="me_add")
 
@@ -197,7 +209,6 @@ def _safe_category_columns(df: pd.DataFrame) -> list[str]:
         if c in df.columns and c not in dims:
             dims.insert(0, c)
 
-    # Unique giữ thứ tự
     seen, out = set(), []
     for c in dims:
         if c not in seen:
@@ -365,19 +376,24 @@ def render_pivot_builder(df: pd.DataFrame):
                 default=measure_names[:1] if measure_names else [],
                 key="selected_measures",
             )
-            # ✅ ĐẶT Ở ĐÂY (trong if use_measures)
+
             add_sum_cols = st.multiselect(
-               "➕ Add columns (SUM)",
-               options=numeric_cols,
-               default=[c for c in ["Tổng_Gross", "Tổng_Net"] if c in numeric_cols],
-               key="add_sum_cols",
+                "➕ Add columns (SUM)",
+                options=numeric_cols,
+                default=[c for c in ["Tổng_Gross", "Tổng_Net"] if c in numeric_cols],
+                key="add_sum_cols",
             )
+
+            # để tránh lỗi biến khi xuống dưới
+            values, agg_name, fillna0 = [], "Sum", True
         else:
             selected_measures = []
+            add_sum_cols = []
+
             values = st.multiselect(
                 "Values",
                 options=numeric_cols,
-                default=[c for c in ["Tổng_Net"] if c in numeric_cols] or numeric_cols[:1],
+                default=[c for c in ["Tổng_Net"] if c in numeric_cols] or (numeric_cols[:1] if numeric_cols else []),
                 key="values",
             )
             agg_name = st.selectbox("Aggregation", options=AGG_CHOICES, index=0, key="agg")
@@ -399,52 +415,36 @@ def render_pivot_builder(df: pd.DataFrame):
 
     # 3) compute pivot
     if use_measures:
-        if not selected_measures:
-            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
+        if (not selected_measures) and (not add_sum_cols):
+            st.warning("Bạn đang bật Measures nhưng chưa chọn Measure nào hoặc chưa chọn Add columns (SUM).")
             return
 
         group_keys = rows + (cols if cols else [])
-        if use_measures:
-            if not selected_measures:
-            st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
-            return
 
-    # UI: cho phép thêm cột SUM song song với measure
-    add_sum_cols = st.multiselect(
-        "➕ Add columns (SUM)",
-        options=numeric_cols,
-        default=[c for c in ["Tổng_Gross", "Tổng_Net"] if c in numeric_cols],
-        key="add_sum_cols",
-    )
+        # gộp measures + SUM columns
+        selected_specs = {m: user_measures[m] for m in selected_measures}
 
-    group_keys = rows + (cols if cols else [])
+        for col in add_sum_cols:
+            name = f"SUM({col})"
+            if name not in selected_specs:
+                selected_specs[name] = {"type": "sum", "col": col}
 
-    # gộp measures + sum columns
-    selected_specs = {m: user_measures[m] for m in selected_measures}
+        out = compute_measures(dff, group_keys=group_keys, measures=selected_specs)
+        value_cols = list(selected_specs.keys())
 
-    for col in add_sum_cols:
-        name = f"SUM({col})"
-        # tránh đè nếu trùng
-        if name not in selected_specs:
-            selected_specs[name] = {"type": "sum", "col": col}
-
-    out = compute_measures(dff, group_keys=group_keys, measures=selected_specs)
-    value_cols = list(selected_specs.keys())
-
-    if cols:
-        pv = out.pivot_table(
-            index=rows,
-            columns=cols,
-            values=value_cols,
-            aggfunc="first",
-            margins=show_total,
-        )
-        if isinstance(pv.columns, pd.MultiIndex):
-            pv.columns = [" | ".join(map(str, t)) for t in pv.columns]
-        pv = pv.reset_index()
-    else:
-        pv = out
-
+        if cols:
+            pv = out.pivot_table(
+                index=rows,
+                columns=cols,
+                values=value_cols,
+                aggfunc="first",
+                margins=show_total,
+            )
+            if isinstance(pv.columns, pd.MultiIndex):
+                pv.columns = [" | ".join(map(str, t)) for t in pv.columns]
+            pv = pv.reset_index()
+        else:
+            pv = out
 
     else:
         if not values:
@@ -464,7 +464,10 @@ def render_pivot_builder(df: pd.DataFrame):
         )
 
         if isinstance(pv.columns, pd.MultiIndex):
-            pv.columns = [" | ".join([str(x) for x in tup if x is not None and str(x) != ""]) for tup in pv.columns]
+            pv.columns = [
+                " | ".join([str(x) for x in tup if x is not None and str(x) != ""])
+                for tup in pv.columns
+            ]
         else:
             pv.columns = pv.columns.map(str)
 
