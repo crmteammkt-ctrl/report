@@ -365,6 +365,13 @@ def render_pivot_builder(df: pd.DataFrame):
                 default=measure_names[:1] if measure_names else [],
                 key="selected_measures",
             )
+            # ✅ ĐẶT Ở ĐÂY (trong if use_measures)
+            add_sum_cols = st.multiselect(
+               "➕ Add columns (SUM)",
+               options=numeric_cols,
+               default=[c for c in ["Tổng_Gross", "Tổng_Net"] if c in numeric_cols],
+               key="add_sum_cols",
+            )
         else:
             selected_measures = []
             values = st.multiselect(
@@ -397,19 +404,47 @@ def render_pivot_builder(df: pd.DataFrame):
             return
 
         group_keys = rows + (cols if cols else [])
-        out = compute_measures(
-            dff,
-            group_keys=group_keys,
-            measures={m: user_measures[m] for m in selected_measures},
-        )
+        if use_measures:
+    if not selected_measures:
+        st.warning("Bạn đang bật Measures nhưng chưa chọn measure nào. Hãy tạo/ADD nhanh ở sidebar rồi chọn.")
+        return
 
-        if cols:
-            pv = out.pivot_table(index=rows, columns=cols, values=selected_measures, aggfunc="first", margins=show_total)
-            if isinstance(pv.columns, pd.MultiIndex):
-                pv.columns = [" | ".join(map(str, t)) for t in pv.columns]
-            pv = pv.reset_index()
-        else:
-            pv = out
+    # UI: cho phép thêm cột SUM song song với measure
+    add_sum_cols = st.multiselect(
+        "➕ Add columns (SUM)",
+        options=numeric_cols,
+        default=[c for c in ["Tổng_Gross", "Tổng_Net"] if c in numeric_cols],
+        key="add_sum_cols",
+    )
+
+    group_keys = rows + (cols if cols else [])
+
+    # gộp measures + sum columns
+    selected_specs = {m: user_measures[m] for m in selected_measures}
+
+    for col in add_sum_cols:
+        name = f"SUM({col})"
+        # tránh đè nếu trùng
+        if name not in selected_specs:
+            selected_specs[name] = {"type": "sum", "col": col}
+
+    out = compute_measures(dff, group_keys=group_keys, measures=selected_specs)
+    value_cols = list(selected_specs.keys())
+
+    if cols:
+        pv = out.pivot_table(
+            index=rows,
+            columns=cols,
+            values=value_cols,
+            aggfunc="first",
+            margins=show_total,
+        )
+        if isinstance(pv.columns, pd.MultiIndex):
+            pv.columns = [" | ".join(map(str, t)) for t in pv.columns]
+        pv = pv.reset_index()
+    else:
+        pv = out
+
 
     else:
         if not values:
